@@ -8,7 +8,7 @@ const app = express();
 
 // Middleware
 app.use(cors({
-  origin: process.env.CLIENT_ORIGIN || "https://fag1122.netlify.app/",
+  origin: process.env.CLIENT_ORIGIN,
   credentials: true
 }));
 app.use(express.json());
