@@ -18,7 +18,7 @@ const userSchema = new mongoose.Schema(
     city: String,
     country: String,
     refCode: { type: String, unique: true, index: true },
-    parentId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+    parentId: { type: mongoose.Schema.Types.ObjectId, ref: "user", default: null },
     balance: { type: Number, default: 0 },
     referralsCount: { type: Number, default: 0 },
     bonusEarned: { type: Number, default: 0 },
@@ -29,4 +29,4 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model("User", userSchema);
+module.exports = mongoose.model("user", userSchema);

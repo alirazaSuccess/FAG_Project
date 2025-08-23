@@ -1,6 +1,6 @@
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-const User = require("../models/User");
+const User = require("../models/user.js");
 
 // Profit levels upto 10 levels
 const PROFIT_LEVELS = [10, 5, 3, 3, 2, 2, 1.5, 1.5, 1, 1];
