@@ -3,11 +3,13 @@ const Admin = require("../models/admin_model");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../models/user.js");
+const { adminListWithdrawals, adminApproveWithdrawal, adminRejectWithdrawal } = require("../Controller/admin_controller.js");
+const auth = require("../middleware/auth.js");
 const router = express.Router();
 
 // Helper: Generate JWT token
 const generateToken = (admin) =>
-  jwt.sign({ id: admin._id, email: admin.email }, process.env.JWT_SECRET, {
+  jwt.sign({ id: admin._id, email: admin.email, role: "admin" }, process.env.JWT_SECRET, {
     expiresIn: "1d",
   });
 
@@ -91,5 +93,10 @@ router.get("/users", authAdmin, async (req, res) => {
     res.status(500).json({ message: "Failed to fetch users" });
   }
 });
+
+// AFTER ✅ use admin JWT guard you already have in this file
+router.get("/withdrawals", authAdmin, adminListWithdrawals);
+router.post("/withdrawals/:id/approve", authAdmin, adminApproveWithdrawal);
+router.post("/withdrawals/:id/reject", authAdmin, adminRejectWithdrawal);
 
 module.exports = router;
