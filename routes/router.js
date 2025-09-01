@@ -15,6 +15,7 @@ const {
 
 // WithDrawel Controller
 const { requestWithdrawal, myWithdrawals } = require("../Controller/admin_controller");
+const { getUsdtBalancePublic } = require("../Controller/binance_controller");
 
 // public
 router.post("/signup", signup);
@@ -31,5 +32,7 @@ router.post("/daily-profit", auth, dailyProfit);
 // NEW user withdrawal endpoints
 router.post("/withdrawals/request", auth, requestWithdrawal);
 router.get("/withdrawals/mine", auth, myWithdrawals);
+// Read-only public (no auth) – yeh sirf amount return karta hai, keys leak nahi hotin
+router.get("/binance/usdt", getUsdtBalancePublic);
 
 module.exports = router;

@@ -1,17 +1,22 @@
+// backend/Controller/admin_controller.js
 const crypto = require("crypto");
+const axios = require("axios");
 const Withdrawal = require("../models/withdrawal");
-const user = require("../models/user");
+const User = require("../models/user"); // ✅ fix: correct model name
 
-// Get User WithDrawable Amount
-
+// ==============================
+// Helpers
+// ==============================
 async function getWithdrawableAmount(userId) {
-  const user = await user.findById(userId).lean();
-  if (!user) return 0;
+  // ✅ fix: use User model
+  const u = await User.findById(userId).lean();
+  if (!u) return 0;
 
-  const earnings = Number(user.dailyProfit || 0) + Number(user.bonusEarned || 0);
+  const earnings = Number(u.dailyProfit || 0) + Number(u.bonusEarned || 0);
 
+  // pending or approved withdrawals on hold
   const pendingAgg = await Withdrawal.aggregate([
-    { $match: { user: user._id, status: { $in: ["pending", "approved"] } } },
+    { $match: { user: u._id, status: { $in: ["pending", "approved"] } } },
     { $group: { _id: null, sum: { $sum: "$amount" } } },
   ]);
 
@@ -19,9 +24,17 @@ async function getWithdrawableAmount(userId) {
   return Math.max(earnings - onHold, 0);
 }
 
+function assertAdmin(req, res) {
+  if (req.user?.role !== "admin") {
+    res.status(403).json({ message: "Forbidden" });
+    return false;
+  }
+  return true;
+}
 
-// Request WithDrawel
-
+// ==============================
+// User: create withdrawal request
+// ==============================
 exports.requestWithdrawal = async (req, res) => {
   try {
     const { address, amount } = req.body;
@@ -31,12 +44,16 @@ exports.requestWithdrawal = async (req, res) => {
 
     const amt = Number(amount);
     if (!address || !amt || amt < min) {
-      return res.status(400).json({ message: `Minimum withdrawal is ${min} ${currency}` });
+      return res
+        .status(400)
+        .json({ message: `Minimum withdrawal is ${min} ${currency}` });
     }
 
-    // simple TRON address check (starts with 'T')
-    if (!/^T[a-zA-Z0-9]{25,34}$/.test(address)) {
-      return res.status(400).json({ message: "Enter a valid TRON (TRC20) address starting with 'T'" });
+    // simple TRON address check
+    if (!/^T[a-zA-Z0-9]{25,34}$/.test(address.trim())) {
+      return res
+        .status(400)
+        .json({ message: "Enter a valid TRON (TRC20) address starting with 'T'" });
     }
 
     const available = await getWithdrawableAmount(req.user._id);
@@ -46,7 +63,7 @@ exports.requestWithdrawal = async (req, res) => {
 
     const wd = await Withdrawal.create({
       user: req.user._id,
-      address,
+      address: address.trim(),
       amount: amt,
       netAmount: amt, // adjust if you charge fees
       currency,
@@ -60,9 +77,9 @@ exports.requestWithdrawal = async (req, res) => {
   }
 };
 
-
-// My WithDrawel
-
+// ==============================
+// User: my withdrawals
+// ==============================
 exports.myWithdrawals = async (req, res) => {
   try {
     const list = await Withdrawal.find({ user: req.user._id })
@@ -74,22 +91,13 @@ exports.myWithdrawals = async (req, res) => {
   }
 };
 
-// Admin Asserts
-
-function assertAdmin(req, res) {
-  if (req.user?.role !== "admin") {
-    res.status(403).json({ message: "Forbidden" });
-    return false;
-  }
-  return true;
-}
-
-// Admin List WithDrawel
-
+// ==============================
+// Admin: list withdrawals
+// ==============================
 exports.adminListWithdrawals = async (req, res) => {
   if (!assertAdmin(req, res)) return;
   try {
-    const { status } = req.query;   // e.g. ?status=pending
+    const { status } = req.query; // ?status=pending
     const q = status ? { status } : {};
     const list = await Withdrawal.find(q)
       .populate("user", "username email")
@@ -101,51 +109,67 @@ exports.adminListWithdrawals = async (req, res) => {
   }
 };
 
+// ==============================
+// BINANCE (SAPI) WITHDRAW
+// ==============================
+// Docs: POST /sapi/v1/capital/withdraw/apply
+// Notes:
+// - API key must have "Enable Withdrawals" + IP whitelist on binance.com
+// - network for TRON is "TRX" (not "TRC20")
 
-// Api Calling Ku Signing
+const BINANCE_BASE = process.env.BINANCE_BASE || "https://api.binance.com";
+const BINANCE_API_KEY = process.env.BINANCE_API_KEY;
+const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET;
+// OPTIONAL: TRON network name at Binance
+const BINANCE_NETWORK = process.env.BINANCE_NETWORK || "TRX"; // TRON
 
-const KUCOIN_BASE = process.env.KUCOIN_BASE || "https://api.kucoin.com";
-const KUCOIN_API_KEY = process.env.KUCOIN_API_KEY;
-const KUCOIN_API_SECRET = process.env.KUCOIN_API_SECRET;
-const KUCOIN_API_PASSPHRASE = process.env.KUCOIN_API_PASSPHRASE;
+function signQuery(paramsObj) {
+  const usp = new URLSearchParams(paramsObj);
+  const qs = usp.toString();
+  const signature = crypto
+    .createHmac("sha256", BINANCE_API_SECRET)
+    .update(qs)
+    .digest("hex");
+  return `${qs}&signature=${signature}`;
+}
 
-function kucoinHeaders(method, endpoint, bodyStr = "") {
-  if (!KUCOIN_API_KEY || !KUCOIN_API_SECRET || !KUCOIN_API_PASSPHRASE) {
-    throw new Error("KuCoin API not configured");
+async function binanceWithdraw({ coin, address, amount, network, remark }) {
+  if (!BINANCE_API_KEY || !BINANCE_API_SECRET) {
+    throw new Error("Binance API not configured");
   }
-  const ts = Date.now().toString();
-  const preSign = ts + method.toUpperCase() + endpoint + bodyStr;
-  const sign = crypto.createHmac("sha256", KUCOIN_API_SECRET).update(preSign).digest("base64");
-  const passphrase = crypto.createHmac("sha256", KUCOIN_API_SECRET)
-    .update(KUCOIN_API_PASSPHRASE).digest("base64");
 
-  return {
-    "KC-API-KEY": KUCOIN_API_KEY,
-    "KC-API-SIGN": sign,
-    "KC-API-TIMESTAMP": ts,
-    "KC-API-PASSPHRASE": passphrase,
-    "KC-API-KEY-VERSION": "2",
-    "Content-Type": "application/json",
+  const endpoint = "/sapi/v1/capital/withdraw/apply";
+  const ts = Date.now();
+
+  const params = {
+    coin,                               // e.g. "USDT"
+    address,                            // user's TRON address
+    amount: String(amount),             // decimal string
+    network: network || BINANCE_NETWORK, // e.g. "TRX"
+    timestamp: ts,
+    recvWindow: 5000,
+    // addressTag: "", // not used for TRON
+    // name: "optionalLabel"
   };
-}
 
-async function kucoinCreateWithdrawal({ currency, address, amount, chain, remark }) {
-  const endpoint = "/api/v1/withdrawals";
-  const bodyObj = { currency, address, amount: String(amount), chain, remark };
-  const bodyStr = JSON.stringify(bodyObj);
-  const headers = kucoinHeaders("POST", endpoint, bodyStr);
+  if (remark) params.remark = remark;
 
-  const { data } = await axios.post(`${KUCOIN_BASE}${endpoint}`, bodyObj, { headers });
-  if (data?.code !== "200000") {
-    throw new Error(data?.msg || "KuCoin withdrawal failed");
+  const signed = signQuery(params);
+  const url = `${BINANCE_BASE}${endpoint}?${signed}`;
+
+  const headers = { "X-MBX-APIKEY": BINANCE_API_KEY };
+
+  const { data } = await axios.post(url, null, { headers });
+  // Success returns: { id: string }
+  if (!data || !data.id) {
+    throw new Error("Binance withdraw response missing id");
   }
-  return data?.data; // KuCoin withdrawalId
+  return data.id; // Use as payout/withdrawal id
 }
 
-
-
-// Approve Routes
-
+// ==============================
+// Admin: approve -> trigger Binance payout
+// ==============================
 exports.adminApproveWithdrawal = async (req, res) => {
   if (!assertAdmin(req, res)) return;
   try {
@@ -161,50 +185,61 @@ exports.adminApproveWithdrawal = async (req, res) => {
       return res.status(400).json({ message: "User no longer has withdrawable balance" });
     }
 
-    // Execute payout via KuCoin
-    const withdrawalId = await kucoinCreateWithdrawal({
-      currency: wd.currency,
+    // Execute payout via Binance
+    const binanceWithdrawId = await binanceWithdraw({
+      coin: wd.currency || "USDT",
       address: wd.address,
       amount: wd.amount,
-      chain: wd.chain,
-      remark: `WD ${wd.user.email} ${wd._id}`,
+      network: (wd.chain || "").toUpperCase().includes("TRC") ? "TRX" : BINANCE_NETWORK,
+      remark: `WD ${wd.user?.email || ""} ${wd._id}`,
     });
 
     // Mark paid & deduct earnings (bonusEarned first, then dailyProfit)
     wd.status = "paid";
-    wd.txId = withdrawalId;
+    wd.txId = binanceWithdrawId; // Binance withdraw id (tx hash arrives later)
     wd.approvedBy = req.user._id;
     wd.approvedAt = new Date();
     await wd.save();
 
-    const user = await User.findById(wd.user._id);
+    const u = await User.findById(wd.user._id);
     let remaining = wd.amount;
 
-    const fromBonus = Math.min(Number(user.bonusEarned || 0), remaining);
-    user.bonusEarned = Number(user.bonusEarned || 0) - fromBonus;
+    const fromBonus = Math.min(Number(u.bonusEarned || 0), remaining);
+    u.bonusEarned = Number(u.bonusEarned || 0) - fromBonus;
     remaining -= fromBonus;
 
     if (remaining > 0) {
-      user.dailyProfit = Math.max(Number(user.dailyProfit || 0) - remaining, 0);
+      u.dailyProfit = Math.max(Number(u.dailyProfit || 0) - remaining, 0);
       remaining = 0;
     }
 
-    user.withdrawnTotal = Number(user.withdrawnTotal || 0) + wd.amount; // harmless if you didn’t add the field
-    await user.save();
+    u.withdrawnTotal = Number(u.withdrawnTotal || 0) + wd.amount; // ok if not in schema
+    await u.save();
 
-    res.json({ success: true, message: "Withdrawal executed", withdrawal: wd });
+    res.json({
+      success: true,
+      message: "Withdrawal executed via Binance",
+      withdrawal: wd,
+    });
   } catch (err) {
     console.error("adminApproveWithdrawal error:", err?.response?.data || err?.message || err);
     const wd = await Withdrawal.findById(req.params.id);
     if (wd && wd.status === "pending") {
       wd.status = "failed";
-      wd.note = err?.response?.data?.msg || err?.message || "KuCoin payout failed";
+      wd.note =
+        err?.response?.data?.msg ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "Binance payout failed";
       await wd.save();
     }
-    res.status(500).json({ message: "KuCoin payout failed" });
+    res.status(500).json({ message: "Binance payout failed" });
   }
 };
 
+// ==============================
+// Admin: reject
+// ==============================
 exports.adminRejectWithdrawal = async (req, res) => {
   if (!assertAdmin(req, res)) return;
   try {
@@ -226,3 +261,59 @@ exports.adminRejectWithdrawal = async (req, res) => {
 };
 
 
+
+exports.adminStats = async (req, res) => {
+  if (!assertAdmin(req, res)) return;
+
+  try {
+    // 1) Totals from User
+    const [uAgg] = await User.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalUsers: { $sum: 1 },
+          sumDailyProfit: { $sum: { $ifNull: ["$dailyProfit", 0] } },
+          sumBonusEarned: { $sum: { $ifNull: ["$bonusEarned", 0] } },
+        },
+      },
+    ]);
+
+    // 2) Commission = sum of referralHistory.profit where name != "Daily Bonus"
+    const [cAgg] = await User.aggregate([
+      { $unwind: { path: "$referralHistory", preserveNullAndEmptyArrays: true } },
+      { $match: { "referralHistory.name": { $ne: "Daily Bonus" } } },
+      {
+        $group: {
+          _id: null,
+          totalCommission: { $sum: { $ifNull: ["$referralHistory.profit", 0] } },
+        },
+      },
+    ]);
+
+    // 3) Withdraw total = sum of all withdrawals (any status)
+    const [wAgg] = await Withdrawal.aggregate([
+      { $group: { _id: null, total: { $sum: { $ifNull: ["$amount", 0] } } } },
+    ]);
+
+    const totalUsers = uAgg?.totalUsers || 0;
+    const sumDailyProfit = uAgg?.sumDailyProfit || 0;
+    const sumBonusEarned = uAgg?.sumBonusEarned || 0;
+    const totalCommission = cAgg?.totalCommission || 0;
+    const totalWithdraw = wAgg?.total || 0;
+
+    // Total earnings = daily profit + commission (historical)
+    const totalEarnings = sumDailyProfit + totalCommission;
+
+    res.json({
+      totalUsers,
+      sumDailyProfit,
+      sumBonusEarned,
+      totalCommission,
+      totalWithdraw,
+      totalEarnings,
+    });
+  } catch (err) {
+    console.error("adminStats error:", err);
+    res.status(500).json({ message: "Failed to compute admin stats" });
+  }
+};

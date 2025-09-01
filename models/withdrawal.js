@@ -1,4 +1,4 @@
-// models/withdrawal.js
+// backend/models/withdrawal.js (unchanged)
 const mongoose = require("mongoose");
 
 const withdrawalSchema = new mongoose.Schema(
@@ -14,9 +14,9 @@ const withdrawalSchema = new mongoose.Schema(
       type: String,
       enum: ["pending", "approved", "rejected", "paid", "failed"],
       default: "pending",
-      index: true
+      index: true,
     },
-    txId: { type: String },
+    txId: { type: String }, // we store Binance withdrawId here
     note: { type: String },
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "user" },
     approvedAt: { type: Date },
