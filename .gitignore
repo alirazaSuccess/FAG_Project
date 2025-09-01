@@ -13,6 +13,7 @@ bun-debug.log*
 # -----------------------
 # Node modules
 # -----------------------
+/Backend/node_modules/
 node_modules/
 **/node_modules/
 
@@ -42,48 +43,4 @@ out/
 # -----------------------
 .env
 .env.*
-!.env.example        # keep sample env file in git
-
-# -----------------------
-# OS / Editor junk
-# -----------------------
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# -----------------------
-# PIDs / misc runtime
-# -----------------------
-pids
-*.pid
-*.seed
-*.pid.lock
-
-# -----------------------
-# Local data / uploads
-# -----------------------
-data/
-tmp/
-temp/
-uploads/
-!uploads/.gitkeep    # keep the folder, ignore files
-
-# -----------------------
-# Archives / certs (optional)
-# -----------------------
-*.zip
-*.tgz
-*.tar
-*.pem
-*.key
-*.crt
-
-# -----------------------
-# (Monorepo convenience)
-# -----------------------
-/frontend/build/
-/backend/build/
-/backend/dist/
+/Backend/.env
