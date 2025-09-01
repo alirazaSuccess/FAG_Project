@@ -15,7 +15,6 @@
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.18.0",
-    "moralis": "^2.27.2",
     "node-cron": "^4.2.1",
     "tronweb": "^6.0.4"
   },
