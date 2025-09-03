@@ -8,7 +8,7 @@ const User = require("../models/user");
 // ===========================
 // Config / Constants
 // ===========================
-const MIN_DEPOSIT_USD = 50;
+const MIN_DEPOSIT_USD = 1;
 
 const BSC_USDT_CONTRACT =
   (process.env.BSC_USDT_CONTRACT ||
@@ -159,8 +159,6 @@ async function distributeProfit(paidUser) {
 function makeBscProvider() {
   const urls = [
     process.env.BSC_RPC_PRIMARY,       // e.g. https://rpc.ankr.com/bsc/...
-    process.env.BSC_RPC_FALLBACK_1,    // e.g. https://bsc-dataseed.binance.org
-    process.env.BSC_RPC_FALLBACK_2,
   ].filter(Boolean);
 
   if (!urls.length) throw new Error("No BSC RPC provided (set BSC_RPC_PRIMARY)");
