@@ -6,7 +6,7 @@ const withdrawalSchema = new mongoose.Schema(
     user: { type: mongoose.Schema.Types.ObjectId, ref: "user", required: true, index: true },
     amount: { type: Number, required: true, min: 0 },
     currency: { type: String, default: "USDT" },
-    chain: { type: String, default: "TRC20" }, // USDT on TRON
+    chain: { type: String, default: "BEP20" }, // USDT on BEP20
     address: { type: String, required: true },
     fee: { type: Number, default: 0 },
     netAmount: { type: Number, default: 0 },

@@ -40,7 +40,7 @@ exports.requestWithdrawal = async (req, res) => {
     const { address, amount } = req.body;
     const min = Number(process.env.WITHDRAW_MIN || 10);
     const currency = process.env.WITHDRAW_CURRENCY || "USDT";
-    const chain = process.env.WITHDRAW_CHAIN || "TRC20";
+    const chain = process.env.WITHDRAW_CHAIN || "BEP20";
 
     const amt = Number(amount);
     if (!address || !amt || amt < min) {
@@ -50,11 +50,12 @@ exports.requestWithdrawal = async (req, res) => {
     }
 
     // simple TRON address check
-    if (!/^T[a-zA-Z0-9]{25,34}$/.test(address.trim())) {
-      return res
-        .status(400)
-        .json({ message: "Enter a valid TRON (TRC20) address starting with 'T'" });
-    }
+  // EVM address check (BEP-20): 0x + 40 hex
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address.trim())) {
+   return res
+      .status(400)
+      .json({ message: "Enter a valid BEP20 (BSC) address starting with 0x" });
+  }
 
     const available = await getWithdrawableAmount(req.user._id);
     if (amt > available) {
@@ -121,7 +122,7 @@ const BINANCE_BASE = process.env.BINANCE_BASE || "https://api.binance.com";
 const BINANCE_API_KEY = process.env.BINANCE_API_KEY;
 const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET;
 // OPTIONAL: TRON network name at Binance
-const BINANCE_NETWORK = process.env.BINANCE_NETWORK || "TRX"; // TRON
+const BINANCE_NETWORK = process.env.BINANCE_NETWORK || "BSC";
 
 function signQuery(paramsObj) {
   const usp = new URLSearchParams(paramsObj);
@@ -190,7 +191,7 @@ exports.adminApproveWithdrawal = async (req, res) => {
       coin: wd.currency || "USDT",
       address: wd.address,
       amount: wd.amount,
-      network: (wd.chain || "").toUpperCase().includes("TRC") ? "TRX" : BINANCE_NETWORK,
+      network: (wd.chain || "").toUpperCase().includes("BEP") ? "BSC" : BINANCE_NETWORK,
       remark: `WD ${wd.user?.email || ""} ${wd._id}`,
     });
 

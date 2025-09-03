@@ -1,25 +1,33 @@
+// backend/Controller/controller.js
+
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
+const { ethers } = require("ethers");
 const User = require("../models/user");
-const axios = require("axios");
-const TronWeb = require("tronweb");
 
+// ===========================
+// Config / Constants
+// ===========================
+const MIN_DEPOSIT_USD = 50;
 
-// Profit levels upto 10 levels
+const BSC_USDT_CONTRACT =
+  (process.env.BSC_USDT_CONTRACT ||
+    "0x55d398326f99059fF775485246999027B3197955").toLowerCase();
+const BSC_USDT_DECIMALS = Number(process.env.BSC_USDT_DECIMALS || 18);
+
+// ERC-20 Transfer event signature
+const TRANSFER_TOPIC = ethers.utils.id(
+  "Transfer(address,address,uint256)"
+);
+
+// ===========================
+// Referral / Rank Configuration
+// ===========================
+
+// Profit levels up to 10 levels (per successful deposit)
 const PROFIT_LEVELS = [10, 5, 3, 3, 2, 2, 1.5, 1.5, 1, 1];
 
-// Generate referral code
-const generateRefCode = () => "REF" + Math.floor(100000 + Math.random() * 900000);
-
-// JWT token generator
-const generateToken = (user) =>
-  jwt.sign(
-    { _id: user._id, email: user.email, role: user.role },  // ✅ role included
-    process.env.JWT_SECRET,
-    { expiresIn: "7d" }
-  );
-
-// Rank Rules (exponential referrals)
+// Rank rules (based on a “3-wide” structure + active downlines)
 const RANK_RULES = [
   { level: 1, requiredUsers: 3, rank: "Bronze" },
   { level: 2, requiredUsers: 9, rank: "Silver" },
@@ -34,54 +42,64 @@ const RANK_RULES = [
 ];
 
 // ===========================
-// Count ONLY active referrals recursively
+// Utils
+// ===========================
+const generateRefCode = () =>
+  "REF" + Math.floor(100000 + Math.random() * 900000);
+
+const generateToken = (user) =>
+  jwt.sign(
+    { _id: user._id, email: user.email, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: "7d" }
+  );
+
+// ===========================
+// Level / Rank Calculation
+// ===========================
 async function countActiveReferrals(userId) {
-  const directRefs = await User.find({ parentId: userId, balance: { $gte: 50 } });
+  const directRefs = await User.find({
+    parentId: userId,
+    balance: { $gte: MIN_DEPOSIT_USD },
+  });
   if (!directRefs.length) return 0;
 
   let total = directRefs.length;
-  for (let ref of directRefs) {
+  for (const ref of directRefs) {
     total += await countActiveReferrals(ref._id);
   }
   return total;
 }
 
-// ===========================
-// Calculate level based on active referrals recursively
 async function getUserLevel(userId) {
   const user = await User.findById(userId);
-  if (!user || user.balance < 50) return 0;
+  if (!user || (user.balance || 0) < MIN_DEPOSIT_USD) return 0;
 
-  const directRefs = await User.find({ parentId: userId, balance: { $gte: 50 } });
-  if (directRefs.length < 3) return 0; // Minimum 3 active referrals to level up
+  const directRefs = await User.find({
+    parentId: userId,
+    balance: { $gte: MIN_DEPOSIT_USD },
+  });
+  // Need 3 active directs to start levelling
+  if (directRefs.length < 3) return 0;
 
-  const levels = [];
-  for (let ref of directRefs) {
-    const subLevel = await getUserLevel(ref._id);
-    levels.push(subLevel);
+  const subLevels = [];
+  for (const ref of directRefs) {
+    subLevels.push(await getUserLevel(ref._id));
   }
-
-  const minSubLevel = levels.length ? Math.min(...levels) : 0;
-  const userLevel = Math.min(minSubLevel + 1, 10); // Max level 10
-  return userLevel;
+  const minSub = subLevels.length ? Math.min(...subLevels) : 0;
+  return Math.min(minSub + 1, 10);
 }
 
-// ===========================
-// Convert level to rank
 function levelToRank(level) {
-  const rule = RANK_RULES.find(r => r.level === level);
+  const rule = RANK_RULES.find((r) => r.level === level);
   return rule ? rule.rank : "Starter";
 }
 
-// ===========================
-// Update rank & level based on active referrals
 async function updateLevelAndRank(userId) {
   const user = await User.findById(userId);
-  if (!user || user.balance < 50) return;
-
+  if (!user || (user.balance || 0) < MIN_DEPOSIT_USD) return;
   const newLevel = await getUserLevel(userId);
   const newRank = levelToRank(newLevel);
-
   if (user.level !== newLevel || user.rank !== newRank) {
     user.level = newLevel;
     user.rank = newRank;
@@ -90,20 +108,22 @@ async function updateLevelAndRank(userId) {
 }
 
 // ===========================
-// Profit distribution
+// Referral Profit Distribution
+// ===========================
 async function distributeProfit(paidUser) {
   try {
-    let currentParentId = paidUser.parentId;
+    let parentId = paidUser.parentId;
     let level = 0;
 
-    while (currentParentId && level < PROFIT_LEVELS.length) {
-      const parent = await User.findById(currentParentId);
+    while (parentId && level < PROFIT_LEVELS.length) {
+      const parent = await User.findById(parentId);
       if (!parent) break;
 
       const profit = PROFIT_LEVELS[level];
 
-      if (parent.balance >= 50) {
+      if ((parent.balance || 0) >= MIN_DEPOSIT_USD) {
         parent.bonusEarned = (parent.bonusEarned || 0) + profit;
+        parent.referralHistory = parent.referralHistory || [];
         parent.referralHistory.push({
           name: paidUser.username,
           email: paidUser.email,
@@ -111,10 +131,10 @@ async function distributeProfit(paidUser) {
           date: new Date(),
           status: "paid",
         });
-
         await parent.save();
         await updateLevelAndRank(parent._id);
       } else {
+        parent.referralHistory = parent.referralHistory || [];
         parent.referralHistory.push({
           name: paidUser.username,
           email: paidUser.email,
@@ -125,7 +145,7 @@ async function distributeProfit(paidUser) {
         await parent.save();
       }
 
-      currentParentId = parent.parentId;
+      parentId = parent.parentId;
       level++;
     }
   } catch (err) {
@@ -134,17 +154,163 @@ async function distributeProfit(paidUser) {
 }
 
 // ===========================
-// ====== SIGNUP ======
+// BSC (BEP-20) Provider & CHUNKED Log Scanner
+// ===========================
+function makeBscProvider() {
+  const urls = [
+    process.env.BSC_RPC_PRIMARY,       // e.g. https://rpc.ankr.com/bsc/...
+    process.env.BSC_RPC_FALLBACK_1,    // e.g. https://bsc-dataseed.binance.org
+    process.env.BSC_RPC_FALLBACK_2,
+  ].filter(Boolean);
+
+  if (!urls.length) throw new Error("No BSC RPC provided (set BSC_RPC_PRIMARY)");
+
+  let i = 0;
+  let provider = new ethers.providers.JsonRpcProvider(urls[i], {
+    name: "binance",
+    chainId: 56,
+  });
+
+  provider.on("error", () => {
+    i = Math.min(i + 1, urls.length - 1);
+    provider = new ethers.providers.JsonRpcProvider(urls[i], {
+      name: "binance",
+      chainId: 56,
+    });
+  });
+
+  return provider;
+}
+
+// singleton
+const bsc = makeBscProvider();
+
+const ERC20_IFACE = new ethers.utils.Interface([
+  "event Transfer(address indexed from, address indexed to, uint256 value)",
+]);
+
+// Chunking knobs
+const MAX_LOG_SPAN = Math.max(500, Number(process.env.BSC_LOG_MAX_SPAN || 3000));
+const SLEEP_MS_PER_CHUNK = Number(process.env.BSC_LOG_SLEEP_MS || 120);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Scan BSC logs for a USDT (BEP-20) Transfer to ADMIN_WALLET >= amount.
+ * Walks backward from latest block in CHUNKS to avoid "Block range is too large".
+ *
+ * @param {Object} p
+ * @param {string} p.adminWallet - checksum 0x...
+ * @param {number} p.amount - required amount in USDT
+ * @param {number} [p.lookbackBlocks=40000] - total history window (~2 days)
+ * @returns {Promise<null | { txId, from, amount }>}
+ */
+async function findIncomingUsdtBep20({ adminWallet, amount, lookbackBlocks = 40000 }) {
+  if (!adminWallet || !/^0x[a-fA-F0-9]{40}$/.test(adminWallet)) {
+    throw new Error("Invalid ADMIN_WALLET");
+  }
+
+  const usdtAddr = BSC_USDT_CONTRACT;
+  const decimals = BSC_USDT_DECIMALS;
+  const need = ethers.utils.parseUnits(String(amount), decimals);
+  const toTopic = "0x" + "00".repeat(12) + adminWallet.toLowerCase().slice(2);
+
+  const latest = await bsc.getBlockNumber();
+  const oldest = Math.max(latest - lookbackBlocks, 1);
+
+  let toBlock = latest;
+
+  while (toBlock >= oldest) {
+    let span = Math.min(MAX_LOG_SPAN, toBlock - oldest + 1);
+    let fromBlock = Math.max(toBlock - span + 1, oldest);
+
+    // try this window; if provider complains, shrink span until it works
+    let logs = [];
+    while (true) {
+      try {
+        logs = await bsc.getLogs({
+          address: usdtAddr,
+          fromBlock,
+          toBlock,
+          topics: [TRANSFER_TOPIC, null, toTopic],
+        });
+        break; // success
+      } catch (e) {
+        const code = e?.code || e?.error?.code || e?.response?.data?.error?.code;
+        // -32062 or -32005 => block range too large / limit
+        if ((code === -32062 || code === -32005) && span > 500) {
+          span = Math.max(Math.floor(span / 2), 500);
+          fromBlock = Math.max(toBlock - span + 1, oldest);
+          continue; // retry with smaller span
+        }
+        // transient: small sleep & one last retry smaller
+        span = Math.max(Math.floor(span / 2), 500);
+        fromBlock = Math.max(toBlock - span + 1, oldest);
+        await sleep(150);
+        try {
+          logs = await bsc.getLogs({
+            address: usdtAddr,
+            fromBlock,
+            toBlock,
+            topics: [TRANSFER_TOPIC, null, toTopic],
+          });
+          break;
+        } catch {
+          logs = []; // skip this chunk
+          break;
+        }
+      }
+    }
+
+    // process logs (any match returns immediately)
+    for (const lg of logs) {
+      try {
+        const parsed = ERC20_IFACE.parseLog(lg);
+        const to = String(parsed.args.to || "").toLowerCase();
+        if (to !== adminWallet.toLowerCase()) continue;
+        const value = parsed.args.value; // BigNumber
+        if (value.gte(need)) {
+          return {
+            txId: lg.transactionHash,
+            from: String(parsed.args.from || "").toLowerCase(),
+            amount: Number(ethers.utils.formatUnits(value, decimals)),
+          };
+        }
+      } catch {
+        // ignore unparsable
+      }
+    }
+
+    // move to previous window
+    toBlock = fromBlock - 1;
+    if (SLEEP_MS_PER_CHUNK > 0) await sleep(SLEEP_MS_PER_CHUNK);
+  }
+
+  return null;
+}
+
+// ===========================
+// Auth: Signup / Login / Me
+// ===========================
 exports.signup = async (req, res) => {
   try {
-    const { username, email, password, number, address, city, country, refCode: parentRefCode } = req.body;
+    const {
+      username,
+      email,
+      password,
+      number,
+      address,
+      city,
+      country,
+      refCode: parentRefCode,
+    } = req.body;
 
     const existing = await User.findOne({ email });
-    if (existing) return res.status(400).json({ message: "Email already registered" });
+    if (existing)
+      return res.status(400).json({ message: "Email already registered" });
 
     const hash = await bcrypt.hash(password, 10);
 
-    let user = new User({
+    const user = new User({
       username,
       email,
       password: hash,
@@ -158,7 +324,8 @@ exports.signup = async (req, res) => {
 
     if (parentRefCode) {
       const parent = await User.findOne({ refCode: parentRefCode });
-      if (!parent) return res.status(400).json({ message: "Invalid referral code" });
+      if (!parent)
+        return res.status(400).json({ message: "Invalid referral code" });
       user.parentId = parent._id;
     }
 
@@ -179,8 +346,6 @@ exports.signup = async (req, res) => {
   }
 };
 
-// ===========================
-// ====== LOGIN ======
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -193,63 +358,11 @@ exports.login = async (req, res) => {
     const token = generateToken(user);
     res.json({ token, role: user.role, user });
   } catch (err) {
+    console.error("LOGIN error:", err);
     res.status(500).json({ message: err.message });
   }
 };
 
-// ===========================
-// ====== PAYMENT ======
-// exports.payment = async (req, res) => {
-//   try {
-//     const userId = req.user._id;
-//     const { amount } = req.body;
-
-//     if (!amount || amount < 50) return res.status(400).json({ message: "Minimum $50 required" });
-
-//     const user = await User.findById(userId);
-//     if (!user) return res.status(404).json({ message: "User not found" });
-
-//     // add deposit
-//     user.balance = (user.balance || 0) + amount;
-
-//     if (!user.dailyProfit) user.dailyProfit = 0;
-
-//     // ✅ First time eligibility check
-//     if (!user.dailyProfitEligible && user.balance >= 50) {
-//       const now = new Date();
-
-//       user.dailyProfitEligible = true;
-//       user.eligibleSince = now;
-//       user.lastDailyBonusAt = now;
-
-//       // ✅ Immediately give first daily profit
-//       user.dailyProfit += 1;
-//       // user.referralHistory.push({
-//       //   name: "dailyProfit",
-//       //   email: user.email,
-//       //   profit: 1,
-//       //   date: now,
-//       //   status: "paid",
-//       // });
-//     }
-
-//     await user.save();
-//     await distributeProfit(user);
-
-//     res.json({
-//       success: true,
-//       message: `Payment of $${amount} successful!`,
-//       balance: user.balance,
-//       dailyProfit: user.dailyProfit
-//     });
-//   } catch (err) {
-//     console.error("Payment error:", err);
-//     res.status(500).json({ success: false, message: "Payment failed" });
-//   }
-// };
-
-// ===========================
-// ====== /me ======
 exports.me = async (req, res) => {
   try {
     await updateLevelAndRank(req.user._id);
@@ -261,8 +374,9 @@ exports.me = async (req, res) => {
     const referralHistory = user.referralHistory || [];
     let totalProfit = 0;
     const cleanedHistory = referralHistory.map((r) => {
-      totalProfit += Number(r.profit || 0);
-      return { ...r, profit: Number(r.profit || 0) };
+      const p = Number(r.profit || 0);
+      totalProfit += p;
+      return { ...r, profit: p };
     });
 
     res.json({
@@ -280,7 +394,8 @@ exports.me = async (req, res) => {
 };
 
 // ===========================
-// ====== Subusers ======
+// Network / Referrals
+// ===========================
 exports.subusers = async (req, res) => {
   try {
     const subs = await User.find({ parentId: req.user._id }).lean();
@@ -290,8 +405,6 @@ exports.subusers = async (req, res) => {
   }
 };
 
-// ===========================
-// ====== Referral Link ======
 exports.referral = async (req, res) => {
   try {
     const user = await User.findById(req.user._id).lean();
@@ -304,12 +417,10 @@ exports.referral = async (req, res) => {
   }
 };
 
-// ===========================
-// ====== Referral Tree ======
 exports.tree = async (req, res) => {
   try {
     const level1 = await User.find({ parentId: req.user._id }).lean();
-    const ids = level1.map(u => u._id);
+    const ids = level1.map((u) => u._id);
     const level2 = await User.find({ parentId: { $in: ids } }).lean();
     res.json({ level1, level2 });
   } catch (err) {
@@ -317,40 +428,43 @@ exports.tree = async (req, res) => {
   }
 };
 
-// ====== DAILY PROFIT (manual trigger; every 24h) ======
+// ===========================
+// Daily Profit (manual trigger every 24h)
+// ===========================
 exports.dailyProfit = async (req, res) => {
   try {
     const user = await User.findById(req.user._id);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // check eligibility
-    if (!user.dailyProfitEligible || user.balance <= 50) {
-      return res.status(400).json({ message: "User not eligible for daily profit" });
+    if (!user.dailyProfitEligible || (user.balance || 0) <= MIN_DEPOSIT_USD) {
+      return res
+        .status(400)
+        .json({ message: "User not eligible for daily profit" });
     }
 
     const now = new Date();
     const base = user.lastDailyBonusAt || user.eligibleSince;
 
     if (!base) {
-      user.eligibleSince = now; // first eligibility time
+      user.eligibleSince = now;
       await user.save();
-      return res.status(400).json({ message: "Eligibility started. Try again after 24 hours." });
+      return res
+        .status(400)
+        .json({ message: "Eligibility started. Try again after 24 hours." });
     }
 
-    // must wait 24h
     const HOURS_24 = 24 * 60 * 60 * 1000;
     if (now - new Date(base) < HOURS_24) {
       const remainingMs = HOURS_24 - (now - new Date(base));
       return res.status(400).json({
         message: "Daily profit not available yet",
-        remainingHours: Math.ceil(remainingMs / (1000 * 60 * 60))
+        remainingHours: Math.ceil(remainingMs / (1000 * 60 * 60)),
       });
     }
 
-    // ✅ Only update dailyProfit (NOT balance)
     user.dailyProfit = (user.dailyProfit || 0) + 1;
     user.lastDailyBonusAt = now;
-
+    user.referralHistory = user.referralHistory || [];
     user.referralHistory.push({
       name: "Daily Bonus",
       email: user.email,
@@ -364,7 +478,7 @@ exports.dailyProfit = async (req, res) => {
     res.json({
       message: "Daily profit credited ($1)",
       dailyProfit: user.dailyProfit,
-      lastDailyBonusAt: user.lastDailyBonusAt
+      lastDailyBonusAt: user.lastDailyBonusAt,
     });
   } catch (err) {
     console.error("Daily Profit Error:", err);
@@ -373,117 +487,30 @@ exports.dailyProfit = async (req, res) => {
 };
 
 // ===========================
-// PAYMENT (TronGrid v1 only; no TronWeb)
+// Payment Verification (BSC / BEP-20 USDT)
 // ===========================
-
-// Axios instance for TronGrid v1 (base URL only — we’ll inject the API key per request)
-const tronGrid = axios.create({
-  baseURL: process.env.TRONGRID_URL || "https://api.trongrid.io",
-});
-
-// Safe value converter (handles raw integers or decimal strings)
-function toDecimal(valueStr, decimals = 6) {
-  const s = String(valueStr ?? "0").trim();
-  if (s.includes(".")) return Number(s);
-  // treat as big integer with `decimals`
-  try {
-    const n = BigInt(s || "0");
-    const d = BigInt(10) ** BigInt(decimals);
-    const intPart = n / d;
-    const fracPart = n % d;
-    const frac = fracPart.toString().padStart(decimals, "0").replace(/0+$/, "");
-    return Number(frac ? `${intPart}.${frac}` : intPart.toString());
-  } catch {
-    return Number(s) || 0;
-  }
-}
-
-/**
- * Find an incoming USDT (TRC20) transfer to the admin wallet within a lookback window
- * TronGrid v1 endpoint: /v1/accounts/{address}/transactions/trc20
- */
-async function findIncomingUsdt({
-  adminWallet,
-  amount,
-  lookbackMs = 48 * 60 * 60 * 1000,
-}) {
-  const USDT = process.env.USDT_CONTRACT || "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"; // TRC20 USDT mainnet
-
-  // attach API key per-request so it always uses fresh env
-  const headers = {};
-  if (process.env.TRONGRID_API_KEY) {
-    headers["TRON-PRO-API-KEY"] = process.env.TRONGRID_API_KEY;
-  }
-
-  const { data } = await tronGrid.get(
-    `/v1/accounts/${adminWallet}/transactions/trc20`,
-    {
-      params: {
-        limit: 200,
-        contract_address: USDT,
-        only_confirmed: true,
-        order_by: "block_timestamp,desc",
-      },
-      headers,
-      timeout: 15000,
-    }
-  );
-
-  const rows = data?.data || [];
-  const now = Date.now();
-  const need = Number(amount);
-
-  for (const row of rows) {
-    // Typical TronGrid fields:
-    // from, to, token_info.decimals, value (may be int-like string or decimal string), block_timestamp, transaction_id
-    const to = (row.to || "").trim();
-    const ts = Number(row.block_timestamp || 0);
-    const dec = Number(row.token_info?.decimals ?? 6);
-
-    const valueNum = toDecimal(row.value, dec);
-
-    if (
-      to &&
-      to.toLowerCase() === adminWallet.toLowerCase() &&
-      ts &&
-      now - ts <= lookbackMs &&
-      valueNum >= need
-    ) {
-      return {
-        txId: row.transaction_id || row.txID,
-        from: row.from,
-        amount: valueNum,
-        timestamp: ts,
-        decimals: dec,
-      };
-    }
-  }
-
-  return null;
-}
-
-// ===========================
-// ====== VERIFY PAYMENT =====
 exports.verifyPayment = async (req, res) => {
   try {
     const { amount } = req.body;
     const userId = req.user?._id;
 
-    // Basic validation
-    if (!amount || parseFloat(amount) < 50) {
-      return res.status(400).json({ message: "Minimum $50 required" });
+    const amt = parseFloat(amount);
+    if (!amt || amt < MIN_DEPOSIT_USD) {
+      return res.status(400).json({ message: `Minimum $${MIN_DEPOSIT_USD} required` });
     }
 
     const adminWallet = (process.env.ADMIN_WALLET || "").trim();
     if (!adminWallet) {
-      return res.status(500).json({ message: "Server wallet not configured" });
+      return res
+        .status(500)
+        .json({ message: "Server wallet not configured (ADMIN_WALLET missing)" });
     }
 
-    // 1) Look for a confirmed TRC20 USDT transfer to admin wallet (recent window)
-    const matched = await findIncomingUsdt({
+    // Scan recent logs for a matching inbound transfer (chunked)
+    const matched = await findIncomingUsdtBep20({
       adminWallet,
-      amount: parseFloat(amount),
-      lookbackMs: 48 * 60 * 60 * 1000, // last 48h
+      amount: amt,
+      lookbackBlocks: 60000, // ~2 days worth of blocks on BSC
     });
 
     if (!matched) {
@@ -493,40 +520,49 @@ exports.verifyPayment = async (req, res) => {
       });
     }
 
-    // 2) Update user balance & daily-profit eligibility
+    // Credit user
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const credited = parseFloat(amount);
-    user.balance = (user.balance || 0) + credited;
+    user.balance = (user.balance || 0) + amt;
 
+    // Activate daily profit on first $50+ threshold
     if (!user.dailyProfit) user.dailyProfit = 0;
-    if (!user.dailyProfitEligible && user.balance >= 50) {
+    if (!user.dailyProfitEligible && (user.balance || 0) >= MIN_DEPOSIT_USD) {
       const now = new Date();
       user.dailyProfitEligible = true;
       user.eligibleSince = now;
       user.lastDailyBonusAt = now;
-      user.dailyProfit += 1; // first $1 instantly
+      user.dailyProfit += 1; // instant first $1 bonus
+    }
+
+    // Prevent double-credit (store txId history)
+    user.payments = user.payments || [];
+    if (!user.payments.find((p) => p.txId === matched.txId)) {
+      user.payments.push({
+        txId: matched.txId,
+        amount: matched.amount,
+        at: new Date(),
+        chain: "BSC",
+      });
     }
 
     await user.save();
 
-    // 3) Distribute referral profits up the chain
+    // Referral distribution
     await distributeProfit(user);
 
-    return res.json({
+    res.json({
       success: true,
-      message: `✅ Verified: $${credited} USDT received.`,
+      message: `✅ Verified: $${amt} USDT received.`,
+      network: "BSC",
       balance: user.balance,
       txHash: matched.txId,
       from: matched.from,
     });
   } catch (err) {
-    // This catches missing/invalid API key too (TronGrid error body arrives in err.response.data)
-    console.error(
-      "Verify Payment Error:",
-      err?.response?.data || err?.message || err
-    );
-    return res.status(500).json({ message: "Error verifying payment" });
+    console.error("Verify Payment Error:", err?.response?.data || err?.message || err);
+    const msg = err?.message || "Error verifying payment";
+    res.status(500).json({ message: msg });
   }
 };
